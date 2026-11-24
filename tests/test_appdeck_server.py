@@ -7,10 +7,64 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
 
-from appdeck_server import AppController, AppDeckServer, parse_exec
+from appdeck_server import AppController, AppDeckServer, parse_exec, public_origin
 
 
 class ParseExecTests(unittest.TestCase):
+    def test_https_origin_configuration(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "appdeck_server.config_home", return_value=Path(temporary)
+        ):
+            path = Path(temporary) / "appdeck/connection.json"
+            path.parent.mkdir()
+            for value, expected in [
+                ("https://deck.example:8443", "https://deck.example:8443"),
+                ("https://DECK.example:443/", "https://deck.example"),
+                ("https://192.168.1.2:8443", "https://192.168.1.2:8443"),
+            ]:
+                path.write_text(json.dumps({"origin": value}))
+                self.assertEqual(public_origin(), expected)
+            for value in [
+                "http://deck.example", "https://user@deck.example",
+                "https://deck.example/path", "https://deck.example?x=1",
+                "https://deck.example:0", "https://deck.example:99999",
+            ]:
+                path.write_text(json.dumps({"origin": value}))
+                with self.assertRaises(RuntimeError, msg=value):
+                    public_origin()
+
+    def test_reverse_proxy_requires_configured_https_host_and_origin(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "appdeck_server.config_home", return_value=Path(temporary) / "config"
+        ), patch("appdeck_server.state_home", return_value=Path(temporary) / "state"), redirect_stdout(StringIO()):
+            origin = "https://deck.example:8443"
+            server = AppDeckServer(("127.0.0.1", 0), "test-token", AppController(), origin)
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_port}/api/ping"
+            try:
+                for headers, status in [
+                    ({"Host": "deck.example:8443", "Origin": origin, "Authorization": "Bearer test-token"}, 200),
+                    ({"Host": "wrong.example:8443", "Origin": origin, "Authorization": "Bearer test-token"}, 403),
+                    ({"Host": "deck.example:8443", "Origin": "http://deck.example:8443", "Authorization": "Bearer test-token"}, 403),
+                ]:
+                    request = Request(url, data=b"", headers=headers, method="POST")
+                    try:
+                        with urlopen(request, timeout=2) as response:
+                            self.assertEqual(response.status, status)
+                    except HTTPError as error:
+                        self.assertEqual(error.code, status)
+                        error.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
     def test_expands_supported_fields_without_shell_interpretation(self):
         desktop_file = Path("/usr/share/applications/sample.desktop")
         argv = parse_exec(

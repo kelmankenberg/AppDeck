@@ -14,7 +14,6 @@ import secrets
 import shlex
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -355,37 +354,54 @@ class AppController:
         return "running" if self._is_running(app_id) else "stopped"
 
 
-def discover_private_ipv4() -> str:
-    result = subprocess.run(
-        ["ip", "-j", "-4", "addr", "show", "scope", "global"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=3,
-    )
-    interfaces = json.loads(result.stdout)
-    for interface in interfaces:
-        for address in interface.get("addr_info", []):
-            if address.get("family") != "inet":
-                continue
-            candidate = ipaddress.ip_address(address.get("local", ""))
-            if candidate.is_private and not candidate.is_loopback and not candidate.is_link_local:
-                return str(candidate)
-    raise RuntimeError("No private IPv4 address found; connect to a trusted local network.")
+def public_origin() -> str:
+    path = config_home() / "appdeck/connection.json"
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        origin = data["origin"]
+        if not isinstance(origin, str) or origin != origin.strip():
+            raise ValueError("invalid origin")
+        parsed = urlsplit(origin)
+        port = parsed.port
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+            or any(char.isspace() for char in parsed.netloc)
+            or port == 0
+        ):
+            raise ValueError("invalid origin")
+        host = parsed.hostname.lower()
+        try:
+            address = ipaddress.ip_address(host)
+            host = f"[{address}]" if address.version == 6 else str(address)
+        except ValueError:
+            if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host):
+                raise ValueError("invalid hostname")
+        return f"https://{host}" + (f":{port}" if port and port != 443 else "")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise RuntimeError(
+            "Configure a trusted HTTPS proxy in ~/.config/appdeck/connection.json; see the README."
+        ) from error
 
 
 class AppDeckServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], token: str, controller: AppController) -> None:
+    def __init__(self, address: tuple[str, int], token: str, controller: AppController, origin: str | None = None) -> None:
         super().__init__(address, AppDeckHandler)
         self.token = token
         self.pairing_code = f"{secrets.randbelow(100_000_000):08d}"
         self.pairing_failures: list[float] = []
         self.pairing_lock = threading.Lock()
         self.controller = controller
-        self.origin = f"http://{self.server_address[0]}:{self.server_address[1]}"
+        self.origin = origin or f"http://{self.server_address[0]}:{self.server_address[1]}"
         self.failed_auth: dict[str, list[float]] = {}
         self.phone_lock = threading.Lock()
         self.phone_connected = False
@@ -443,7 +459,7 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
         self._send(status, json.dumps(value, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
     def _host_is_valid(self) -> bool:
-        if self.headers.get("Host", "") != f"{self.server.server_address[0]}:{self.server.server_address[1]}":
+        if self.headers.get("Host", "").lower() != urlsplit(self.server.origin).netloc:
             return False
         origin = self.headers.get("Origin")
         return not origin or origin == self.server.origin
@@ -632,10 +648,10 @@ def create_qr_file(url: str, runtime_dir: Path) -> str:
 
 
 def main() -> int:
-    address = discover_private_ipv4()
+    origin = public_origin()
     token = secrets.token_urlsafe(24)
     controller = AppController()
-    server = AppDeckServer((address, PORT), token, controller)
+    server = AppDeckServer(("127.0.0.1", PORT), token, controller, origin)
     url = f"{server.origin}/#{token}"
 
     runtime_base = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir()))

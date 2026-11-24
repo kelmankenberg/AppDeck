@@ -1,7 +1,7 @@
 # App Deck
 
-Launch and manage selected Omarchy applications from a phone on the same trusted
-private network.
+Launch and manage selected Omarchy applications from a phone using a trusted
+HTTPS connection.
 
 App Deck is an Omarchy Quattro bar plugin with a small local Python service and
 a mobile-friendly browser interface. On the phone, use **Configure** to choose
@@ -22,9 +22,8 @@ Display preferences are saved in that browser.
 
 ![App Deck in fullscreen, full-width landscape Deck mode](screenshots/deck-mode-fullscreen.png)
 
-> **Security:** App Deck uses unencrypted HTTP. Use it only on a trusted
-> private network; do not expose its port to the internet or use it on public
-> or shared Wi-Fi.
+> **Security:** A trusted HTTPS reverse proxy is required. Never bypass browser
+> certificate warnings or expose App Deck to the public internet.
 
 ## Planned for the next release
 
@@ -41,21 +40,54 @@ On Omarchy Quattro, review the repository and then install and enable it:
 omarchy plugin add https://github.com/kelmankenberg/AppDeck.git --enable
 ```
 
-Click the App Deck bar icon to show the address, pairing code, and, if
-available, a QR code. On a phone connected to the same trusted network, scan
-the QR code or open the address and enter the pairing code. Use the gear
-button to select apps, then tap a card to launch or stop an app.
+Configure a trusted HTTPS reverse proxy before pairing. The proxy must forward
+requests to `http://127.0.0.1:8765`, preserve the original `Host` header and
+restrict access to trusted devices. Do not expose the HTTP backend on the
+network or enable public forwarding.
 
-The service needs Python 3 and the `ip` command. `qrencode` is optional for QR
-pairing; PyGObject, GTK 4 and GdkPixbuf are optional for app icons. Without
-them, use manual pairing or the initial-based icon placeholders respectively.
+Choose one of these proxy setups:
 
-If the phone cannot connect, check that both devices are on the same trusted
-network and that the firewall permits TCP port `8765` from that network only.
-The service chooses one private IPv4 address at startup. After a network
-change, reload the plugin and use the new address and pairing code. A port
-conflict or the absence of a private IPv4 address prevents the service from
-starting.
+- **Tailscale Serve:** Install and connect Tailscale on the PC and phone,
+  enable HTTPS for your tailnet, and select an unused HTTPS port. For example,
+  `tailscale serve --bg --https=8443 http://127.0.0.1:8765` makes the service
+  available only within the tailnet. Check `tailscale serve status` first so
+  you do not overwrite an existing service. Use the HTTPS URL shown by Serve.
+  Certificate provisioning publishes the device's DNS name in a public
+  certificate transparency log. See the [Tailscale Serve documentation](https://tailscale.com/docs/features/tailscale-serve).
+- **LAN HTTPS proxy:** Configure a reverse proxy with an HTTPS certificate that
+  the phone's browser trusts for its exact hostname or IP address. Restrict its
+  listener and firewall to your trusted LAN. Certificate issuance, phone
+  trust, renewal, and hostname resolution depend on your proxy and network.
+  A self-signed certificate accepted through a browser warning is not a
+  substitute for trusted server authentication.
+
+For example, a Caddy configuration using an already trusted certificate could
+look like this (replace the hostname, LAN address, and certificate paths):
+
+```caddyfile
+https://deck.example:8443 {
+    bind 192.168.1.10
+    tls /path/to/certificate.pem /path/to/private-key.pem
+    reverse_proxy 127.0.0.1:8765
+}
+```
+
+Create `~/.config/appdeck/connection.json` with the exact HTTPS origin, for
+example:
+
+```json
+{"origin": "https://your-device.example:8443"}
+```
+
+Reload the plugin, then click its bar icon to see the address, pairing code,
+and optional QR code. Scan the QR code or open the HTTPS address and enter the
+pairing code. Use the gear button to select apps. If the certificate is not
+trusted or the proxy cannot reach the local backend, fix the proxy before
+pairing; do not bypass certificate warnings.
+
+The service needs Python 3. `qrencode` is optional for QR pairing; PyGObject,
+GTK 4 and GdkPixbuf are optional for app icons. Without them, use manual
+pairing or the initial-based icon placeholders respectively.
 
 ## Remove
 
@@ -64,8 +96,10 @@ omarchy plugin remove kelmankenberg.appdeck
 ```
 
 Removal unloads the plugin, but does not delete its selected-app and process
-tracking data in `~/.config/appdeck/` and `~/.local/state/appdeck/`. Browser
-preferences are stored separately in each browser.
+tracking data or connection settings in `~/.config/appdeck/` and
+`~/.local/state/appdeck/`. Browser preferences are stored separately in each
+browser. Remove the App Deck proxy route separately; do not reset unrelated
+Tailscale Serve or reverse-proxy routes.
 
 ## Development
 
@@ -89,15 +123,16 @@ omarchy plugin validate .
 
 ## Security and behavior
 
-- The service binds to a private IPv4 address on TCP port `8765`. It does
-  not listen on every interface or expose a shell endpoint.
+- The backend binds only to `127.0.0.1:8765` and requires an HTTPS reverse
+  proxy. It does not expose a shell endpoint. Other local processes on the PC
+  are within the trust boundary.
 - Manual pairing uses an eight-digit code, with a global limit of five failed
   attempts per five minutes. It exchanges the code for the same random per-run
   bearer token used by QR pairing. Both change when the service restarts. The
   API only accepts configured desktop-app IDs and launch/stop actions.
-- This initial browser version uses HTTP. Use it only on a trusted private
-  network; do not port-forward the service or use it on public/shared Wi-Fi.
-  Other devices on that network may be able to observe traffic.
+- HTTPS protects the phone-to-proxy connection only when the certificate and
+  hostname are trusted. The proxy-to-backend connection is local HTTP; local
+  processes and proxy administrators remain within the trust boundary.
 - App Deck launches the selected desktop entry's `Exec` command without a
   shell. Stop targets only the process group App Deck started. Apps that hand
   off to a pre-existing single-instance process may not be trackable or

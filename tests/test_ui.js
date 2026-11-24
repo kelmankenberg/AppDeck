@@ -6,7 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
-function createUi(storage = new Map()) {
+function createUi(storage = new Map(), options = {}) {
   function element() {
     return {
       children: [],
@@ -22,7 +22,8 @@ function createUi(storage = new Map()) {
       append(child) { this.children.push(child); },
       replaceChildren() { this.children = []; },
       addEventListener(event, callback) { this.listeners[event] = callback; },
-      setAttribute(name, value) { this.attributes[name] = value; }
+      setAttribute(name, value) { this.attributes[name] = value; },
+      querySelector() { return element(); }
     };
   }
   const elements = new Map();
@@ -50,9 +51,13 @@ function createUi(storage = new Map()) {
       getItem(key) { return storage.get(key) ?? null; },
       setItem(key, value) { storage.set(key, value); }
     },
-    sessionStorage: { getItem() { return null; }, removeItem() {} },
+    sessionStorage: options.sessionStorage || { getItem() { return null; }, removeItem() {} },
+    fetch: options.fetch,
     window: {
-      location: { hash: "" },
+      location: options.location || { hash: "", protocol: "https:" },
+      history: { replaceState() {} },
+      clearInterval() {},
+      setInterval() { return 1; },
       addEventListener() {},
       getComputedStyle() { return { fontSize: "16px" }; }
     }
@@ -347,4 +352,37 @@ test("manual pairing exchanges the short code for the bearer token", async () =>
   assert.deepEqual(JSON.parse(requests[0].options.body), { code: "0012-3456" });
   assert.equal(requests[1].options.headers.Authorization, "Bearer long-token");
   assert.equal(ui.elements.get("#pairing-code").value, "");
+});
+
+test("insecure HTTP does not transmit a stored token or pairing fragment", () => {
+  const calls = [];
+  const removed = [];
+  const ui = createUi(new Map(), {
+    location: { protocol: "http:", hash: "#new-token" },
+    sessionStorage: { getItem() { return "old-token"; }, removeItem(key) { removed.push(key); } },
+    fetch: (...args) => { calls.push(args); }
+  });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(removed, ["appdeck-token"]);
+  assert.match(ui.elements.get("#pairing-error").textContent, /HTTPS/);
+});
+
+test("new pairing fragment takes precedence over a previously stored token", async () => {
+  const calls = [];
+  const sessionStorage = {
+    getItem() { return "old-token"; },
+    removeItem() {},
+    setItem() {}
+  };
+  createUi(new Map(), {
+    location: { protocol: "https:", hash: "#new-token", pathname: "/" },
+    sessionStorage,
+    fetch: async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, async json() { return { apps: [] }; } };
+    }
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every(({ options }) => options.headers.Authorization === "Bearer new-token"));
 });

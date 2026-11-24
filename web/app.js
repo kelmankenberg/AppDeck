@@ -392,12 +392,22 @@ if ("ResizeObserver" in window) {
   cardSizeObserver.observe(appsContainer);
 }
 
-token = sessionStorage.getItem("appdeck-token") || "";
-if (token) {
-  setConnected(true);
-  loadApps();
-  startHeartbeat();
-} else {
+if (window.location.protocol !== "https:") {
+  sessionStorage.removeItem("appdeck-token");
+  pairingError.textContent = "A trusted HTTPS connection is required. See the App Deck setup instructions.";
+  pairingForm.querySelector("button").disabled = true;
   setConnected(false);
+} else if (window.location.hash) {
+  sessionStorage.removeItem("appdeck-token");
+  setConnected(false);
+  showPairingCodeFromUrl();
+} else {
+  token = sessionStorage.getItem("appdeck-token") || "";
+  if (token) {
+    setConnected(true);
+    loadApps();
+    startHeartbeat();
+  } else {
+    setConnected(false);
+  }
 }
-showPairingCodeFromUrl();

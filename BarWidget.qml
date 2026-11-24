@@ -51,7 +51,7 @@ BarWidget {
     stderr: SplitParser {
       onRead: function(line) {
         if (String(line).trim() !== "")
-          root.serviceError = "App Deck service failed to start. Check its dependencies."
+          root.serviceError = String(line).slice(0, 512)
       }
     }
 
