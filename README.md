@@ -20,6 +20,8 @@ offers four card sizes, a full-width option, and links to report bugs or request
 features on GitHub.
 Display preferences are saved in that browser.
 
+![App Deck in fullscreen, full-width landscape Deck mode](screenshots/deck-mode-fullscreen.png)
+
 > **Security:** App Deck uses unencrypted HTTP. Use it only on a trusted
 > private network; do not expose its port to the internet or use it on public
 > or shared Wi-Fi.
