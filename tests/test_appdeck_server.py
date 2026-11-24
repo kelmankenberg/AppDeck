@@ -7,7 +7,8 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 from unittest.mock import patch
 
-from appdeck_server import AppController, AppDeckServer, parse_exec, public_origin
+from appdeck_server import AppController, AppDeckServer, parse_exec, public_origin, public_origins
+import connection_setup
 
 
 class ParseExecTests(unittest.TestCase):
@@ -64,6 +65,103 @@ class ParseExecTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=2)
+
+    def test_multiple_origins_require_matching_host_and_origin(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "appdeck_server.config_home", return_value=Path(temporary) / "config"
+        ), patch("appdeck_server.state_home", return_value=Path(temporary) / "state"), redirect_stdout(StringIO()):
+            origins = ["https://first.example", "https://second.example:8443"]
+            server = AppDeckServer(("127.0.0.1", 0), "test-token", AppController(), origins)
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            url = f"http://127.0.0.1:{server.server_port}/api/ping"
+            try:
+                for host, origin, status in [
+                    ("first.example", origins[0], 200),
+                    ("second.example:8443", origins[1], 200),
+                    ("first.example", origins[1], 403),
+                    ("other.example", origins[0], 403),
+                ]:
+                    request = Request(url, data=b"", headers={
+                        "Host": host, "Origin": origin, "Authorization": "Bearer test-token"
+                    }, method="POST")
+                    try:
+                        with urlopen(request, timeout=2) as response:
+                            self.assertEqual(response.status, status)
+                    except HTTPError as error:
+                        self.assertEqual(error.code, status)
+                        error.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_setup_preserves_legacy_origin_and_removes_only_selected(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "appdeck_server.config_home", return_value=Path(temporary)
+        ), patch("connection_setup.config_home", return_value=Path(temporary)):
+            path = Path(temporary) / "appdeck/connection.json"
+            path.parent.mkdir()
+            path.write_text(json.dumps({"origin": "https://first.example"}))
+            connection_setup.save_origin("https://second.example:8443")
+            self.assertEqual(public_origins(), ["https://first.example", "https://second.example:8443"])
+            with self.assertRaises(RuntimeError):
+                connection_setup.save_origin("https://third.example")
+            connection_setup.remove_origin("https://first.example")
+            self.assertEqual(public_origins(), ["https://second.example:8443"])
+            connection_setup.remove_origin("https://second.example:8443")
+            self.assertFalse(path.exists())
+
+    def test_tailscale_setup_preserves_routes_and_uses_conditional_write(self):
+        import json
+        from unittest.mock import Mock
+
+        status = {"BackendState": "Running", "Self": {"DNSName": "pc.tail123.ts.net."},
+                  "CertDomains": ["pc.tail123.ts.net"]}
+        routes = {"TCP": {"8443": {"HTTPS": True}},
+                  "Web": {"pc.tail123.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}}}
+        with patch("connection_setup.tailscale_json", return_value=status), patch(
+            "connection_setup.local_request",
+            side_effect=[(200, "snapshot", json.dumps(routes).encode()), (200, "", b"")],
+        ) as local, patch("connection_setup.socket.socket") as sock:
+            sock.return_value.__enter__.return_value = Mock()
+            self.assertEqual(connection_setup.tailscale_origin(), "https://pc.tail123.ts.net:8444")
+            method, written, etag = local.call_args.args
+            self.assertEqual((method, etag), ("POST", "snapshot"))
+            self.assertEqual(written["Web"]["pc.tail123.ts.net:8443"], routes["Web"]["pc.tail123.ts.net:8443"])
+            self.assertEqual(written["Web"]["pc.tail123.ts.net:8444"]["Handlers"]["/"]["Proxy"], connection_setup.BACKEND)
+
+    def test_tailscale_reuses_private_route_and_rejects_stale_update(self):
+        import json
+        from unittest.mock import Mock
+
+        status = {"BackendState": "Running", "Self": {"DNSName": "pc.tail123.ts.net."},
+                  "CertDomains": ["pc.tail123.ts.net"]}
+        route = {"TCP": {"8443": {"HTTPS": True}},
+                 "Web": {"pc.tail123.ts.net:8443": {"Handlers": {"/": {"Proxy": connection_setup.BACKEND}}}}}
+        with patch("connection_setup.tailscale_json", return_value=status), patch(
+            "connection_setup.local_request", return_value=(200, "etag", json.dumps(route).encode())
+        ) as local:
+            self.assertEqual(connection_setup.tailscale_origin(False), "https://pc.tail123.ts.net:8443")
+            self.assertEqual(local.call_count, 1)
+        route["AllowFunnel"] = {"pc.tail123.ts.net:8443": True}
+        with patch("connection_setup.tailscale_json", return_value=status), patch(
+            "connection_setup.local_request", return_value=(200, "etag", json.dumps(route).encode())
+        ) as local:
+            with self.assertRaisesRegex(RuntimeError, "Two addresses"):
+                connection_setup.tailscale_origin(False)
+            self.assertEqual(local.call_count, 1)
+        with patch("connection_setup.tailscale_json", return_value=status), patch(
+            "connection_setup.local_request", side_effect=[(200, "etag", b"{}"), (412, "", b"")]
+        ), patch("connection_setup.socket.socket") as sock:
+            sock.return_value.__enter__.return_value = Mock()
+            with self.assertRaisesRegex(RuntimeError, "changed"):
+                connection_setup.tailscale_origin()
 
     def test_expands_supported_fields_without_shell_interpretation(self):
         desktop_file = Path("/usr/share/applications/sample.desktop")

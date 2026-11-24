@@ -354,12 +354,8 @@ class AppController:
         return "running" if self._is_running(app_id) else "stopped"
 
 
-def public_origin() -> str:
-    path = config_home() / "appdeck/connection.json"
+def normalize_origin(origin: str) -> str:
     try:
-        with path.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-        origin = data["origin"]
         if not isinstance(origin, str) or origin != origin.strip():
             raise ValueError("invalid origin")
         parsed = urlsplit(origin)
@@ -384,24 +380,47 @@ def public_origin() -> str:
             if not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host):
                 raise ValueError("invalid hostname")
         return f"https://{host}" + (f":{port}" if port and port != 443 else "")
-    except (OSError, ValueError, KeyError, TypeError) as error:
+    except (ValueError, TypeError) as error:
+        raise ValueError("Enter an HTTPS origin without a path, query, or credentials.") from error
+
+
+def public_origins() -> list[str]:
+    path = config_home() / "appdeck/connection.json"
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+        origins = data.get("origins", [data["origin"]] if "origin" in data else [])
+        if not isinstance(origins, list) or not origins or len(origins) > 2:
+            raise ValueError("Expected one or two HTTPS origins")
+        normalized = [normalize_origin(origin) for origin in origins]
+        if len(set(normalized)) != len(normalized):
+            raise ValueError("Duplicate origins")
+        return normalized
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         raise RuntimeError(
-            "Configure a trusted HTTPS proxy in ~/.config/appdeck/connection.json; see the README."
+            "Configure a trusted HTTPS connection using the App Deck setup panel."
         ) from error
+
+
+def public_origin() -> str:
+    return public_origins()[0]
 
 
 class AppDeckServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], token: str, controller: AppController, origin: str | None = None) -> None:
+    def __init__(self, address: tuple[str, int], token: str, controller: AppController, origin: str | list[str] | None = None) -> None:
         super().__init__(address, AppDeckHandler)
         self.token = token
         self.pairing_code = f"{secrets.randbelow(100_000_000):08d}"
         self.pairing_failures: list[float] = []
         self.pairing_lock = threading.Lock()
         self.controller = controller
-        self.origin = origin or f"http://{self.server_address[0]}:{self.server_address[1]}"
+        self.origins = [origin] if isinstance(origin, str) else origin or [
+            f"http://{self.server_address[0]}:{self.server_address[1]}"
+        ]
+        self.origin = self.origins[0]
         self.failed_auth: dict[str, list[float]] = {}
         self.phone_lock = threading.Lock()
         self.phone_connected = False
@@ -459,10 +478,12 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
         self._send(status, json.dumps(value, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
     def _host_is_valid(self) -> bool:
-        if self.headers.get("Host", "").lower() != urlsplit(self.server.origin).netloc:
-            return False
+        host = self.headers.get("Host", "").lower()
         origin = self.headers.get("Origin")
-        return not origin or origin == self.server.origin
+        return any(
+            host == urlsplit(allowed).netloc and (not origin or origin == allowed)
+            for allowed in self.server.origins
+        )
 
     def _authorized(self) -> bool:
         now = time.monotonic()
@@ -590,7 +611,7 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
     def _pair(self) -> None:
         if (
             not self._host_is_valid()
-            or self.headers.get("Origin") != self.server.origin
+            or self.headers.get("Origin") not in self.server.origins
             or self.headers.get_content_type() != "application/json"
         ):
             self.close_connection = True
@@ -628,13 +649,13 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
         self._json(status, result)
 
 
-def create_qr_file(url: str, runtime_dir: Path) -> str:
+def create_qr_file(url: str, runtime_dir: Path, index: int = 0) -> str:
     executable = shutil.which("qrencode")
     if not executable:
         return ""
     runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(runtime_dir, 0o700)
-    qr_path = runtime_dir / "pairing.png"
+    qr_path = runtime_dir / ("pairing.png" if index == 0 else f"pairing-{index}.png")
     result = subprocess.run(
         [executable, "-o", str(qr_path), "-s", "6", "-m", "2"],
         input=url.encode("utf-8"),
@@ -648,22 +669,21 @@ def create_qr_file(url: str, runtime_dir: Path) -> str:
 
 
 def main() -> int:
-    origin = public_origin()
+    origins = public_origins()
     token = secrets.token_urlsafe(24)
     controller = AppController()
-    server = AppDeckServer(("127.0.0.1", PORT), token, controller, origin)
-    url = f"{server.origin}/#{token}"
+    server = AppDeckServer(("127.0.0.1", PORT), token, controller, origins)
 
     runtime_base = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir()))
     runtime_dir = runtime_base / f"appdeck-{os.getuid()}"
-    qr_file = create_qr_file(url, runtime_dir)
+    qr_files = [create_qr_file(f"{origin}/#{token}", runtime_dir, index) for index, origin in enumerate(origins)]
 
     print(
         json.dumps(
             {
-                "url": server.origin,
+                "urls": origins,
                 "pairingCode": server.pairing_code[:4] + "-" + server.pairing_code[4:],
-                "qrFile": qr_file,
+                "qrFiles": qr_files,
             }
         ),
         flush=True,
@@ -683,8 +703,9 @@ def main() -> int:
     finally:
         stop_monitor.set()
         server.server_close()
-        if qr_file:
-            Path(qr_file).unlink(missing_ok=True)
+        for qr_file in qr_files:
+            if qr_file:
+                Path(qr_file).unlink(missing_ok=True)
         try:
             runtime_dir.rmdir()
         except OSError:

@@ -41,26 +41,29 @@ On Omarchy Quattro, review the repository and then install and enable it:
 omarchy plugin add https://github.com/kelmankenberg/AppDeck.git --enable
 ```
 
-Configure a trusted HTTPS reverse proxy before pairing. The proxy must forward
-requests to `http://127.0.0.1:8765`, preserve the original `Host` header and
-restrict access to trusted devices. Do not expose the HTTP backend on the
-network or enable public forwarding.
+Click the App Deck bar icon and open **Connection setup**. Up to two HTTPS
+addresses can be used at once; choose the appropriate connection in the popup
+to display its QR code. Changing connections restarts the service, so phones
+must pair again.
 
-Choose one of these proxy setups:
+- **Tailscale:** Connect Tailscale on the PC and phone and enable MagicDNS and
+  HTTPS for your tailnet. Click **Set up Tailscale** to reuse an existing
+  App Deck Serve route or add a new private route on an unused port. If the
+  current user cannot change Serve, the setup panel provides the administrator
+  command to run and then retry. HTTPS certificate provisioning publishes the
+  device's DNS name in a public certificate transparency log. See
+  [Tailscale Serve](https://tailscale.com/docs/features/tailscale-serve).
+- **LAN HTTPS:** Set up an existing trusted reverse proxy, enter its HTTPS
+  origin in the setup panel, and click **Add LAN address**. App Deck does not
+  automatically discover, install, or configure the proxy or certificate.
+  The phone's browser must trust the certificate for that exact hostname or IP.
 
-- **Tailscale Serve:** Install and connect Tailscale on the PC and phone,
-  enable HTTPS for your tailnet, and select an unused HTTPS port. For example,
-  `tailscale serve --bg --https=8443 http://127.0.0.1:8765` makes the service
-  available only within the tailnet. Check `tailscale serve status` first so
-  you do not overwrite an existing service. Use the HTTPS URL shown by Serve.
-  Certificate provisioning publishes the device's DNS name in a public
-  certificate transparency log. See the [Tailscale Serve documentation](https://tailscale.com/docs/features/tailscale-serve).
-- **LAN HTTPS proxy:** Configure a reverse proxy with an HTTPS certificate that
-  the phone's browser trusts for its exact hostname or IP address. Restrict its
-  listener and firewall to your trusted LAN. Certificate issuance, phone
-  trust, renewal, and hostname resolution depend on your proxy and network.
-  A self-signed certificate accepted through a browser warning is not a
-  substitute for trusted server authentication.
+The proxy must forward requests to `http://127.0.0.1:8765`, preserve the
+original `Host` header and restrict access to trusted devices. Do not expose
+the HTTP backend on the network or enable public forwarding. Restrict a LAN
+proxy's listener and firewall to the trusted LAN. Certificate issuance, phone
+trust, renewal, and hostname resolution depend on your proxy and network.
+Never bypass certificate warnings.
 
 For example, a Caddy configuration using an already trusted certificate could
 look like this (replace the hostname, LAN address, and certificate paths):
@@ -73,18 +76,10 @@ https://deck.example:8443 {
 }
 ```
 
-Create `~/.config/appdeck/connection.json` with the exact HTTPS origin, for
-example:
-
-```json
-{"origin": "https://your-device.example:8443"}
-```
-
-Reload the plugin, then click its bar icon to see the address, pairing code,
-and optional QR code. Scan the QR code or open the HTTPS address and enter the
-pairing code. Use the gear button to select apps. If the certificate is not
-trusted or the proxy cannot reach the local backend, fix the proxy before
-pairing; do not bypass certificate warnings.
+After setup, scan the QR code or open the displayed HTTPS address and enter
+the pairing code. Use the gear button to select apps. If the certificate is
+not trusted or the proxy cannot reach the local backend, fix the proxy before
+pairing.
 
 The service needs Python 3. `qrencode` is optional for QR pairing; PyGObject,
 GTK 4 and GdkPixbuf are optional for app icons. Without them, use manual
@@ -99,8 +94,9 @@ omarchy plugin remove kelmankenberg.appdeck
 Removal unloads the plugin, but does not delete its selected-app and process
 tracking data or connection settings in `~/.config/appdeck/` and
 `~/.local/state/appdeck/`. Browser preferences are stored separately in each
-browser. Remove the App Deck proxy route separately; do not reset unrelated
-Tailscale Serve or reverse-proxy routes.
+browser. Removing an address in the setup panel or removing the plugin does
+not remove its proxy route. Remove only the App Deck route separately; do not
+reset unrelated Tailscale Serve or reverse-proxy routes.
 
 ## Development
 
