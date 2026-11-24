@@ -16,11 +16,49 @@ offers four card sizes, a full-width option, and links to report bugs or request
 features on GitHub.
 Display preferences are saved in that browser.
 
+> **Security:** App Deck uses unencrypted HTTP. Use it only on a trusted
+> private network; do not expose its port to the internet or use it on public
+> or shared Wi-Fi.
+
+## Install and connect
+
+On Omarchy Quattro, review the repository and then install and enable it:
+
+```sh
+omarchy plugin add https://github.com/kelmankenberg/AppDeck.git --enable
+```
+
+Click the App Deck bar icon to show the address, pairing code, and, if
+available, a QR code. On a phone connected to the same trusted network, scan
+the QR code or open the address and enter the pairing code. Use the gear
+button to select apps, then tap a card to launch or stop an app.
+
+The service needs Python 3 and the `ip` command. `qrencode` is optional for QR
+pairing; PyGObject, GTK 4 and GdkPixbuf are optional for app icons. Without
+them, use manual pairing or the initial-based icon placeholders respectively.
+
+If the phone cannot connect, check that both devices are on the same trusted
+network and that the firewall permits TCP port `8765` from that network only.
+The service chooses one private IPv4 address at startup. After a network
+change, reload the plugin and use the new address and pairing code. A port
+conflict or the absence of a private IPv4 address prevents the service from
+starting.
+
+## Remove
+
+```sh
+omarchy plugin remove kelmankenberg.appdeck
+```
+
+Removal unloads the plugin, but does not delete its selected-app and process
+tracking data in `~/.config/appdeck/` and `~/.local/state/appdeck/`. Browser
+preferences are stored separately in each browser.
+
 ## Development
 
 The service uses Python 3 and the standard library. `qrencode` is optional; when
-installed, App Deck shows a QR code that opens the phone page and supplies the
-pairing code. Without it, enter the displayed address and pairing code manually.
+installed, App Deck shows a QR code that opens and pairs the phone page. Without
+it, enter the displayed address and pairing code manually.
 App icons use PyGObject, GTK 4 and GdkPixbuf when available; missing icons fall
 back to an initial.
 
@@ -55,4 +93,6 @@ omarchy plugin validate .
   `~/.config/appdeck/apps.json`. Tracked process IDs are stored in
   `~/.local/state/appdeck/runs.json` so a shell reload can retain stop controls.
 
-The plugin has not been published to the Omarchy marketplace.
+## License
+
+App Deck is licensed under the [MIT License](LICENSE).
