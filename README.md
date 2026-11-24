@@ -31,6 +31,7 @@ Display preferences are saved in that browser.
 - Individual paired-device management.
 - Workspace selector buttons at the top of the page.
 - Explore an installable home-screen web app.
+- Optional App closing confirmation
 
 ## Install and connect
 
