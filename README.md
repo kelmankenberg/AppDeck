@@ -8,7 +8,7 @@ a mobile-friendly browser interface. On the phone, use **Configure** to choose
 installed desktop apps, then tap a card to launch or stop an App Deck-managed
 instance.
 
-![App Deck in portrait and landscape phone layouts](preview.png)
+![App Deck in portrait, landscape, and fullscreen landscape phone layouts](preview.png)
 
 *Preview uses sample apps and simulated running states.*
 
