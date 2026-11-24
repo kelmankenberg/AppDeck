@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "kelmankenberg.appdeck",
+  "name": "App Deck",
+  "version": "0.1.0",
+  "author": "Kelly Mankenberg",
+  "description": "Launch and manage Omarchy apps from your phone",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "App Deck",
+    "description": "Launch and manage Omarchy apps from your phone",
+    "category": "Tools",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#161616">
+    <title>App Deck</title>
+    <link rel="stylesheet" href="/style.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">OMARCHY</p>
+          <h1>App Deck</h1>
+        </div>
+        <button id="configure-toggle" class="quiet icon-button" type="button" aria-label="Configure apps" title="Configure apps" hidden>
+          <svg id="configure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/>
+            <path d="M19.4 13.5a7.5 7.5 0 0 0 0-3l1.5-1.2-1.5-2.6-1.8.7a7.4 7.4 0 0 0-2.6-1.5L14.7 4h-3l-.3 1.9a7.4 7.4 0 0 0-2.6 1.5L7 6.7 5.5 9.3 7 10.5a7.5 7.5 0 0 0 0 3l-1.5 1.2L7 17.3l1.8-.7a7.4 7.4 0 0 0 2.6 1.5l.3 1.9h3l.3-1.9a7.4 7.4 0 0 0 2.6-1.5l1.8.7 1.5-2.6-1.5-1.2Z" transform="translate(-.2)"/>
+          </svg>
+          <svg id="configure-done-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden><path d="m5 12 4 4L19 6"/></svg>
+        </button>
+      </header>
+
+      <section id="pairing" class="card">
+        <h2>Connect to your PC</h2>
+        <p>Enter the pairing code shown in the App Deck bar panel.</p>
+        <form id="pairing-form">
+          <label for="pairing-code">Pairing code</label>
+          <input id="pairing-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="9" placeholder="0000-0000" required>
+          <button type="submit">Connect</button>
+        </form>
+        <p id="pairing-error" class="error" role="status"></p>
+      </section>
+
+      <section id="apps-section" hidden>
+        <div class="section-heading">
+          <div class="section-copy">
+            <h2 id="apps-title">Your apps</h2>
+            <p id="apps-subtitle">Tap an app to launch or stop it.</p>
+          </div>
+          <div class="deck-controls">
+            <button id="refresh" class="quiet icon-button" type="button" aria-label="Refresh apps" title="Refresh apps">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.5 9a7 7 0 0 1 11.7-2L20 12M4 12l2.8 5a7 7 0 0 0 11.7-2"/></svg>
+            </button>
+            <button id="deck-mode-toggle" class="quiet icon-button" type="button" aria-label="Enter Deck mode" title="Enter Deck mode" aria-pressed="false">
+              <svg id="deck-enter-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
+              <svg id="deck-exit-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v5"/></svg>
+            </button>
+          </div>
+        </div>
+        <section id="settings" class="settings-card" aria-labelledby="settings-title" hidden>
+          <h2 id="settings-title">Settings</h2>
+          <label for="card-size">Card size</label>
+          <select id="card-size">
+            <option value="default">Default</option>
+            <option value="large">Large</option>
+            <option value="larger">Larger</option>
+            <option value="largest">Largest</option>
+          </select>
+          <label class="setting-toggle">
+            <input id="full-width" type="checkbox">
+            Use full width
+          </label>
+          <p>Saved in this browser.</p>
+          <div class="feedback-links">
+            <a href="https://github.com/kelmankenberg/AppDeck/issues/new?template=bug_report.md" target="_blank" rel="noopener noreferrer">Report a bug</a>
+            <a href="https://github.com/kelmankenberg/AppDeck/issues/new?template=feature_request.md" target="_blank" rel="noopener noreferrer">Request a feature</a>
+          </div>
+          <p>Links open GitHub in a new tab.</p>
+        </section>
+        <h2 id="app-list-title" class="app-list-title" hidden>Choose apps</h2>
+        <div id="app-search-group" class="app-search" hidden>
+          <label for="app-search">Search apps</label>
+          <input id="app-search" type="search" placeholder="Search by name" autocomplete="off">
+        </div>
+        <div id="apps" class="apps" aria-live="polite"></div>
+        <p id="app-error" class="error" role="status"></p>
+        <p id="preference-error" class="error" role="status" hidden></p>
+      </section>
+    </main>
+  </body>
+</html>
