@@ -8,6 +8,10 @@ a mobile-friendly browser interface. On the phone, use **Configure** to choose
 installed desktop apps, then tap a card to launch or stop an App Deck-managed
 instance.
 
+![App Deck in portrait and landscape phone layouts](preview.png)
+
+*Preview uses sample apps and simulated running states.*
+
 Use **Deck mode** to hide the header and controls and request fullscreen.
 **Show controls** restores them and exits fullscreen; the browser's exit
 gesture also leaves Deck mode. Browsers require a fresh tap for fullscreen
