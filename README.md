@@ -26,6 +26,13 @@ Display preferences are saved in that browser.
 > private network; do not expose its port to the internet or use it on public
 > or shared Wi-Fi.
 
+## Planned for the next release
+
+- Drag-to-reorder app cards.
+- Individual paired-device management.
+- Workspace selector buttons at the top of the page.
+- Explore an installable home-screen web app.
+
 ## Install and connect
 
 On Omarchy Quattro, review the repository and then install and enable it:
