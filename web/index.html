@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#161616">
     <title>App Deck</title>
+    <link rel="manifest" href="/app.webmanifest">
+    <link rel="apple-touch-icon" href="/app-icon-192.png">
     <link rel="stylesheet" href="/style.css">
+    <script src="/appearance.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -30,16 +33,23 @@
         <form id="pairing-form">
           <label for="pairing-code">Pairing code</label>
           <input id="pairing-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="9" placeholder="0000-0000" required>
+          <label for="device-name">Device name</label>
+          <input id="device-name" name="device-name" maxlength="64" placeholder="My phone" autocomplete="off">
           <button type="submit">Connect</button>
         </form>
         <p id="pairing-error" class="error" role="status"></p>
       </section>
 
       <section id="apps-section" hidden>
+        <section id="workspaces-section" aria-labelledby="workspace-title">
+          <h2 id="workspace-title">Workspaces</h2>
+          <div id="workspace-buttons" class="workspace-buttons" role="group" aria-label="Workspaces"></div>
+          <p id="workspace-error" class="workspace-error" role="status"></p>
+        </section>
         <div class="section-heading">
           <div class="section-copy">
             <h2 id="apps-title">Your apps</h2>
-            <p id="apps-subtitle">Tap an app to launch or stop it.</p>
+            <p id="apps-subtitle">Tap to launch or stop. Hold and drag to reorder.</p>
           </div>
           <div class="deck-controls">
             <button id="refresh" class="quiet icon-button" type="button" aria-label="Refresh apps" title="Refresh apps">
@@ -64,7 +74,32 @@
             <input id="full-width" type="checkbox">
             Use full width
           </label>
+          <label class="setting-toggle">
+            <input id="center-cards" type="checkbox">
+            Center cards horizontally
+          </label>
+          <label class="setting-toggle">
+            <input id="confirm-stop" type="checkbox">
+            Confirm before stopping apps
+          </label>
           <p>Saved in this browser.</p>
+          <h2>Appearance</h2>
+          <label class="setting-toggle">
+            <input id="follow-desktop-theme" type="checkbox">
+            Follow desktop theme
+          </label>
+          <label class="setting-toggle">
+            <input id="use-desktop-wallpaper" type="checkbox">
+            Use desktop wallpaper
+          </label>
+          <label for="background-dimming">Background dimming: <output id="dimming-value" for="background-dimming">65%</output></label>
+          <input id="background-dimming" type="range" min="0" max="100" step="5" value="65" disabled>
+          <p>Both options are off by default. When enabled, appearance updates about every 10 seconds while this page is visible. Wallpaper is shared only with paired devices and cropped to fit the phone.</p>
+          <h2>Home screen</h2>
+          <button id="install-app" type="button" class="quiet" hidden>Install App Deck</button>
+          <p id="install-help">If the install button is unavailable, use your browser's menu (or Share on iPhone) and choose Install app or Add to Home Screen. Some browsers may create a shortcut instead of an app.</p>
+          <p>The installed app uses this connection address and may ask you to pair again.</p>
+          <p id="install-status" role="status"></p>
           <div class="feedback-links">
             <a href="https://github.com/kelmankenberg/AppDeck/issues/new?template=bug_report.md" target="_blank" rel="noopener noreferrer">Report a bug</a>
             <a href="https://github.com/kelmankenberg/AppDeck/issues/new?template=feature_request.md" target="_blank" rel="noopener noreferrer">Request a feature</a>
@@ -76,9 +111,12 @@
           <label for="app-search">Search apps</label>
           <input id="app-search" type="search" placeholder="Search by name" autocomplete="off">
         </div>
+        <p id="order-hint" class="visually-hidden">Hold and drag to reorder. With a keyboard, use Alt and Left or Right Arrow.</p>
         <div id="apps" class="apps" aria-live="polite"></div>
+        <p id="order-status" class="visually-hidden" role="status"></p>
         <p id="app-error" class="error" role="status"></p>
         <p id="preference-error" class="error" role="status" hidden></p>
+        <p id="appearance-error" class="error" role="status" hidden></p>
       </section>
     </main>
   </body>

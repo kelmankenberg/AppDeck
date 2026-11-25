@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import configparser
+from contextlib import contextmanager
+import fcntl
+import hashlib
 import hmac
 import http.server
 import ipaddress
@@ -22,6 +25,8 @@ import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
+
+from appearance import DesktopAppearance
 
 
 PORT = 8765
@@ -200,6 +205,219 @@ def _atomic_write_json(path: Path, value: Any) -> None:
         raise
 
 
+def pairing_token(rotate: bool = False) -> str:
+    path = state_home() / "appdeck/pairing.json"
+    if not rotate:
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                if os.fstat(file.fileno()).st_mode & 0o077:
+                    raise RuntimeError("App Deck pairing file must be private.")
+                data = json.loads(file.read(1025))
+        except FileNotFoundError:
+            token = secrets.token_urlsafe(24)
+            _atomic_write_json(path, {"version": 2, "token": token})
+            return token
+        except (OSError, ValueError, UnicodeError) as error:
+            raise RuntimeError("Could not read the App Deck pairing file.") from error
+        token = data.get("token") if isinstance(data, dict) else None
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", token):
+            raise RuntimeError("The App Deck pairing file is invalid.")
+        if "version" not in data:
+            return pairing_token(rotate=True)
+        if data["version"] != 2:
+            raise RuntimeError("The App Deck pairing file version is unsupported.")
+        return token
+    token = secrets.token_urlsafe(24)
+    _atomic_write_json(path, {"version": 2, "token": token})
+    return token
+
+
+class DeviceStore:
+    def __init__(self) -> None:
+        self.path = state_home() / "appdeck/devices.json"
+
+    @contextmanager
+    def locked(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (self.path.parent / "devices.lock").open("a", encoding="utf-8") as lock:
+            os.chmod(lock.name, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                try:
+                    with self.path.open(encoding="utf-8") as file:
+                        if os.fstat(file.fileno()).st_mode & 0o077:
+                            raise RuntimeError("App Deck device file must be private.")
+                        payload = file.read(MAX_CONFIG_BYTES + 1)
+                        if len(payload) > MAX_CONFIG_BYTES:
+                            raise ValueError("Device file too large")
+                        data = json.loads(payload)
+                except FileNotFoundError:
+                    data = []
+                if not isinstance(data, list) or len(data) > 32:
+                    raise ValueError("Invalid device list")
+                for device in data:
+                    if (
+                        not isinstance(device, dict)
+                        or not re.fullmatch(r"[a-f0-9]{32}", str(device.get("id", "")))
+                        or not re.fullmatch(r"[a-f0-9]{64}", str(device.get("hash", "")))
+                        or not isinstance(device.get("name"), str)
+                        or not 1 <= len(device["name"]) <= 64
+                        or type(device.get("lastSeen")) not in (int, float)
+                    ):
+                        raise ValueError("Invalid device record")
+                yield data
+            except (OSError, ValueError, UnicodeError) as error:
+                raise RuntimeError("Could not read or save paired devices.") from error
+
+    @staticmethod
+    def name(value: Any) -> str:
+        if not isinstance(value, str) or not 1 <= len(value.strip()) <= 64 or any(ord(c) < 32 for c in value):
+            raise RuntimeError("Use a device name between 1 and 64 characters without control characters.")
+        return value.strip()
+
+    def pair(self, name: str) -> str:
+        name = self.name(name)
+        token = secrets.token_urlsafe(32)
+        with self.locked() as devices:
+            if len(devices) >= 32:
+                raise RuntimeError("The 32-device limit was reached. Disconnect an old device on the PC.")
+            devices.append({
+                "id": secrets.token_hex(16), "name": name,
+                "hash": hashlib.sha256(token.encode()).hexdigest(),
+                "lastSeen": time.time(),
+            })
+            _atomic_write_json(self.path, devices)
+        return token
+
+    def authorize(self, token: str) -> bool:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
+            return False
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with self.locked() as devices:
+            for device in devices:
+                if hmac.compare_digest(device["hash"], digest):
+                    now = time.time()
+                    if now - device["lastSeen"] >= 30:
+                        device["lastSeen"] = now
+                        _atomic_write_json(self.path, devices)
+                    return True
+        return False
+
+    def list(self) -> list[dict[str, Any]]:
+        with self.locked() as devices:
+            return [{key: item[key] for key in ("id", "name", "lastSeen")} for item in devices]
+
+    def update(self, device_id: str, name: str | None = None) -> None:
+        if name is not None:
+            name = self.name(name)
+        with self.locked() as devices:
+            target = next((item for item in devices if item["id"] == device_id), None)
+            if target is None:
+                raise RuntimeError("That paired device no longer exists.")
+            if name is None:
+                devices.remove(target)
+            else:
+                target["name"] = name
+            _atomic_write_json(self.path, devices)
+
+    def revoke_all(self) -> None:
+        with self.locked():
+            _atomic_write_json(self.path, [])
+
+
+def hyprctl(*args: str) -> str:
+    executable = shutil.which("hyprctl")
+    if not executable:
+        raise RuntimeError("Hyprland workspace controls are unavailable.")
+    try:
+        result = subprocess.run(
+            [executable, *args], capture_output=True, text=True, timeout=3, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError("Could not communicate with Hyprland.") from error
+    if result.returncode or len(result.stdout) > 1024 * 1024:
+        raise RuntimeError("Could not communicate with Hyprland.")
+    return result.stdout
+
+
+def workspace_snapshot() -> dict[str, Any]:
+    try:
+        monitors = json.loads(hyprctl("-j", "monitors"))
+        workspaces = json.loads(hyprctl("-j", "workspaces"))
+        if not isinstance(monitors, list) or not isinstance(workspaces, list):
+            raise ValueError("Invalid Hyprland response")
+        focused = next((item for item in monitors if isinstance(item, dict) and item.get("focused") is True), None)
+        if not focused:
+            raise ValueError("No focused monitor")
+        monitor = focused.get("name")
+        active = focused.get("activeWorkspace", {}).get("id")
+        if (
+            not isinstance(monitor, str)
+            or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", monitor)
+            or type(active) is not int
+            or not 1 <= active <= 1_000_000
+        ):
+            raise ValueError("Invalid focused monitor")
+        block = (active - 1) // 10
+        path = state_home() / "omarchy/monitors/workspaces"
+        try:
+            with path.open(encoding="utf-8") as file:
+                mapping = file.read(MAX_CONFIG_BYTES + 1)
+            if len(mapping) > MAX_CONFIG_BYTES:
+                raise ValueError("Workspace mapping too large")
+            for line in mapping.splitlines():
+                fields = line.split("\t")
+                if len(fields) >= 3 and fields[1] == monitor:
+                    block = int(fields[0])
+                    if not 0 <= block <= 99_999:
+                        raise ValueError("Invalid monitor block")
+        except FileNotFoundError:
+            pass
+        own = set(range(block * 10 + 1, block * 10 + 6))
+        guests = set()
+        occupied = set()
+        for item in workspaces:
+            if not isinstance(item, dict):
+                continue
+            workspace_id = item.get("id")
+            if type(workspace_id) is not int or not 1 <= workspace_id <= 1_000_000:
+                continue
+            if isinstance(item.get("windows"), int) and item["windows"] > 0:
+                occupied.add(workspace_id)
+            if (workspace_id - 1) // 10 == block:
+                own.add(workspace_id)
+            elif item.get("monitor") == monitor:
+                guests.add(workspace_id)
+        ids = sorted(own) + sorted(guests)
+        if len(ids) > 256:
+            raise ValueError("Too many workspaces")
+        return {
+            "monitor": monitor,
+            "block": block,
+            "active": active,
+            "workspaces": [
+                {"id": workspace_id, "label": workspace_id % 10, "occupied": workspace_id in occupied}
+                for workspace_id in ids
+            ],
+        }
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        raise RuntimeError("Could not read Hyprland workspaces.") from error
+
+
+def focus_workspace(workspace_id: int) -> None:
+    snapshot = workspace_snapshot()
+    if workspace_id not in {item["id"] for item in snapshot["workspaces"]}:
+        raise RuntimeError("That workspace is no longer available. Try again.")
+    block = (workspace_id - 1) // 10
+    if block == snapshot["block"]:
+        slot = (workspace_id - 1) % 10 + 1
+        expression = f'o.workspaces.focus({slot}, "{snapshot["monitor"]}")'
+    else:
+        expression = f'hl.dsp.focus({{ workspace = "{workspace_id}" }})'
+    if hyprctl("dispatch", expression).strip() != "ok":
+        raise RuntimeError("Hyprland could not switch workspaces.")
+
+
 def _proc_start_time(pid: int) -> str | None:
     try:
         content = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
@@ -215,6 +433,7 @@ class AppController:
         self.config_path = config_home() / "appdeck/apps.json"
         self.runs_path = state_home() / "appdeck/runs.json"
         self.lock = threading.RLock()
+        self.revision = 0
         self.processes: dict[str, subprocess.Popen[bytes]] = {}
         self.runs: dict[str, dict[str, Any]] = {}
         self._load_runs()
@@ -230,16 +449,48 @@ class AppController:
             if isinstance(value, str) and APP_ID_PATTERN.fullmatch(value) and value in catalog
         }
 
+    def ordered_ids(self, catalog: dict[str, dict[str, Any]]) -> list[str]:
+        with self.lock:
+            data = _read_json(self.config_path, {})
+            selected = self.selected_ids(catalog)
+            saved = data.get("order", []) if isinstance(data, dict) else []
+            if not isinstance(saved, list):
+                saved = []
+            ordered = []
+            seen = set()
+            for app_id in saved:
+                if isinstance(app_id, str) and app_id in selected and app_id not in seen:
+                    ordered.append(app_id)
+                    seen.add(app_id)
+            ordered.extend(sorted(selected - seen, key=lambda app_id: (catalog[app_id]["name"].casefold(), app_id)))
+            return ordered
+
+    def _save_selection(self, ordered: list[str]) -> None:
+        value = {"apps": sorted(ordered), "order": ordered}
+        if len((json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")) > MAX_CONFIG_BYTES:
+            raise RuntimeError("Too many apps to save.")
+        _atomic_write_json(self.config_path, value)
+        self.revision += 1
+
     def set_selected(self, app_id: str, enabled: bool, catalog: dict[str, dict[str, Any]]) -> None:
         if app_id not in catalog:
             raise KeyError("App is not installed")
         with self.lock:
-            selected = self.selected_ids(catalog)
-            if enabled:
-                selected.add(app_id)
-            else:
-                selected.discard(app_id)
-            _atomic_write_json(self.config_path, {"apps": sorted(selected)})
+            ordered = self.ordered_ids(catalog)
+            if enabled and app_id not in ordered:
+                ordered.append(app_id)
+                self._save_selection(ordered)
+            elif not enabled and app_id in ordered:
+                ordered.remove(app_id)
+                self._save_selection(ordered)
+
+    def set_order(self, ordered: list[str], revision: int, catalog: dict[str, dict[str, Any]]) -> None:
+        with self.lock:
+            current = self.ordered_ids(catalog)
+            if revision != self.revision or len(ordered) != len(current) or set(ordered) != set(current):
+                raise RuntimeError("App selection or order changed. Refresh and try again.")
+            if ordered != current:
+                self._save_selection(ordered)
 
     def _load_runs(self) -> None:
         data = _read_json(self.runs_path, {})
@@ -413,6 +664,8 @@ class AppDeckServer(http.server.ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], token: str, controller: AppController, origin: str | list[str] | None = None) -> None:
         super().__init__(address, AppDeckHandler)
         self.token = token
+        self.devices = DeviceStore()
+        self.appearance = DesktopAppearance(state_home(), config_home())
         self.pairing_code = f"{secrets.randbelow(100_000_000):08d}"
         self.pairing_failures: list[float] = []
         self.pairing_lock = threading.Lock()
@@ -425,6 +678,21 @@ class AppDeckServer(http.server.ThreadingHTTPServer):
         self.phone_lock = threading.Lock()
         self.phone_connected = False
         self.last_phone_activity: float | None = None
+        self.workspace_lock = threading.Lock()
+        self.workspace_cache: dict[str, Any] | None = None
+        self.workspace_cache_time = 0.0
+
+    def workspaces(self) -> dict[str, Any]:
+        with self.workspace_lock:
+            now = time.monotonic()
+            if self.workspace_cache is None or now - self.workspace_cache_time >= 1:
+                self.workspace_cache = workspace_snapshot()
+                self.workspace_cache_time = time.monotonic()
+            return self.workspace_cache
+
+    def clear_workspaces(self) -> None:
+        with self.workspace_lock:
+            self.workspace_cache = None
 
     def mark_phone_activity(self, now: float | None = None) -> None:
         with self.phone_lock:
@@ -470,7 +738,7 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
 
@@ -485,7 +753,7 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
             for allowed in self.server.origins
         )
 
-    def _authorized(self) -> bool:
+    def _authorized(self) -> bool | None:
         now = time.monotonic()
         address = self.client_address[0]
         recent = [stamp for stamp in self.server.failed_auth.get(address, []) if now - stamp < 60]
@@ -494,7 +762,11 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
             return False
 
         supplied = self.headers.get("Authorization", "")
-        valid = hmac.compare_digest(supplied, f"Bearer {self.server.token}")
+        try:
+            valid = supplied.startswith("Bearer ") and self.server.devices.authorize(supplied[7:])
+        except RuntimeError as error:
+            self._json(503, {"error": str(error)})
+            return None
         if not valid:
             recent.append(now)
         self.server.failed_auth[address] = recent
@@ -504,7 +776,10 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
         if not self._host_is_valid():
             self._json(403, {"error": "Invalid host"})
             return False
-        if not self._authorized():
+        authorized = self._authorized()
+        if authorized is None:
+            return False
+        if not authorized:
             self._json(401, {"error": "Pairing code required"})
             return False
         self.server.mark_phone_activity()
@@ -522,25 +797,53 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
             self._send(200, (Path(__file__).parent / "web/index.html").read_bytes(), "text/html; charset=utf-8")
         elif path == "/app.js":
             self._send(200, (Path(__file__).parent / "web/app.js").read_bytes(), "text/javascript; charset=utf-8")
+        elif path == "/appearance.js":
+            self._send(200, (Path(__file__).parent / "web/appearance.js").read_bytes(), "text/javascript; charset=utf-8")
         elif path == "/style.css":
             self._send(200, (Path(__file__).parent / "web/style.css").read_bytes(), "text/css; charset=utf-8")
+        elif path == "/app.webmanifest":
+            self._send(200, (Path(__file__).parent / "web/app.webmanifest").read_bytes(), "application/manifest+json")
+        elif path in ("/app-icon-192.png", "/app-icon-512.png"):
+            self._send(200, (Path(__file__).parent / "web" / path[1:]).read_bytes(), "image/png")
         elif path == "/api/apps":
             if not self._require_request():
                 return
             catalog = self._catalog()
-            selected = self.server.controller.selected_ids(catalog)
+            with self.server.controller.lock:
+                ordered = self.server.controller.ordered_ids(catalog)
+                revision = self.server.controller.revision
+            selected = set(ordered)
             icons, icon_error = resolve_app_icons({app_id: catalog[app_id] for app_id in selected})
+            remaining = sorted(set(catalog) - selected, key=lambda app_id: (catalog[app_id]["name"].casefold(), app_id))
             apps = [
                 {
                     "id": app_id,
-                    "name": app["name"],
+                    "name": catalog[app_id]["name"],
                     "selected": app_id in selected,
                     "state": self.server.controller.state(app_id),
                     "icon": icons.get(app_id, ""),
                 }
-                for app_id, app in sorted(catalog.items(), key=lambda item: item[1]["name"].casefold())
+                for app_id in ordered + remaining
             ]
-            self._json(200, {"apps": apps, "iconError": icon_error})
+            self._json(200, {"apps": apps, "iconError": icon_error, "revision": revision})
+        elif path == "/api/workspaces":
+            if not self._require_request():
+                return
+            try:
+                self._json(200, self.server.workspaces())
+            except RuntimeError as error:
+                self._json(503, {"error": str(error)})
+        elif path == "/api/appearance":
+            if not self._require_request():
+                return
+            self._json(200, self.server.appearance.snapshot())
+        elif path == "/api/wallpaper":
+            if not self._require_request():
+                return
+            try:
+                self._send(200, self.server.appearance.wallpaper(), "image/jpeg")
+            except RuntimeError as error:
+                self._json(503, {"error": str(error)})
         else:
             self._json(404, {"error": "Not found"})
 
@@ -554,6 +857,46 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
 
         try:
             if path == "/api/ping":
+                with self.server.controller.lock:
+                    revision = self.server.controller.revision
+                self._json(200, {"ok": True, "revision": revision})
+                return
+
+            workspace_match = re.fullmatch(r"/api/workspaces/([1-9][0-9]{0,6})/focus", path)
+            if workspace_match:
+                if self.headers.get("Content-Length", "0") != "0":
+                    self.close_connection = True
+                    self._json(400, {"error": "Invalid request"})
+                    return
+                focus_workspace(int(workspace_match.group(1)))
+                self.server.clear_workspaces()
+                self._json(200, {"ok": True})
+                return
+
+            if path == "/api/order":
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_CONFIG_BYTES:
+                    self.close_connection = True
+                    self._json(413, {"error": "Invalid request size"})
+                    return
+                try:
+                    payload = json.loads(self.rfile.read(length))
+                except (ValueError, UnicodeError):
+                    self._json(400, {"error": "Invalid request"})
+                    return
+                if (
+                    not isinstance(payload, dict)
+                    or not isinstance(payload.get("order"), list)
+                    or not all(isinstance(item, str) and APP_ID_PATTERN.fullmatch(item) for item in payload["order"])
+                    or type(payload.get("revision")) is not int
+                ):
+                    self._json(400, {"error": "Invalid request"})
+                    return
+                try:
+                    self.server.controller.set_order(payload["order"], payload["revision"], self._catalog())
+                except RuntimeError as error:
+                    self._json(409, {"error": str(error)})
+                    return
                 self._json(200, {"ok": True})
                 return
 
@@ -630,6 +973,8 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
         except (ValueError, UnicodeError):
             payload = None
         code = payload.get("code") if isinstance(payload, dict) else None
+        secret = payload.get("secret") if isinstance(payload, dict) else None
+        name = payload.get("name", "Phone") if isinstance(payload, dict) else "Phone"
         valid_format = isinstance(code, str) and re.fullmatch(r"[0-9]{4}-?[0-9]{4}", code)
         normalized = code.replace("-", "") if valid_format else ""
 
@@ -641,11 +986,18 @@ class AppDeckHandler(http.server.BaseHTTPRequestHandler):
             ]
             if len(self.server.pairing_failures) >= PAIRING_ATTEMPTS:
                 status, result = 429, {"error": "Too many pairing attempts. Try again in five minutes."}
-            elif not hmac.compare_digest(normalized, self.server.pairing_code):
+            elif not (
+                hmac.compare_digest(normalized, self.server.pairing_code)
+                or (isinstance(secret, str) and secret.isascii() and len(secret) == 32
+                    and hmac.compare_digest(secret, self.server.token))
+            ):
                 self.server.pairing_failures.append(now)
                 status, result = 401, {"error": "Incorrect pairing code"}
             else:
-                status, result = 200, {"token": self.server.token}
+                try:
+                    status, result = 200, {"token": self.server.devices.pair(name)}
+                except RuntimeError as error:
+                    status, result = 422, {"error": str(error)}
         self._json(status, result)
 
 
@@ -670,7 +1022,7 @@ def create_qr_file(url: str, runtime_dir: Path, index: int = 0) -> str:
 
 def main() -> int:
     origins = public_origins()
-    token = secrets.token_urlsafe(24)
+    token = pairing_token()
     controller = AppController()
     server = AppDeckServer(("127.0.0.1", PORT), token, controller, origins)
 

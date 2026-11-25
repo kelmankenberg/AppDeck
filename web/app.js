@@ -3,8 +3,11 @@
 const pairing = document.querySelector("#pairing");
 const pairingForm = document.querySelector("#pairing-form");
 const pairingCode = document.querySelector("#pairing-code");
+const deviceName = document.querySelector("#device-name");
 const pairingError = document.querySelector("#pairing-error");
 const appsSection = document.querySelector("#apps-section");
+const workspaceButtons = document.querySelector("#workspace-buttons");
+const workspaceError = document.querySelector("#workspace-error");
 const appsContainer = document.querySelector("#apps");
 const appsTitle = document.querySelector("#apps-title");
 const appsSubtitle = document.querySelector("#apps-subtitle");
@@ -20,18 +23,39 @@ const preferenceError = document.querySelector("#preference-error");
 const settings = document.querySelector("#settings");
 const cardSizeSelect = document.querySelector("#card-size");
 const fullWidthToggle = document.querySelector("#full-width");
+const centerCardsToggle = document.querySelector("#center-cards");
+const confirmStopToggle = document.querySelector("#confirm-stop");
+const installButton = document.querySelector("#install-app");
+const installHelp = document.querySelector("#install-help");
+const installStatus = document.querySelector("#install-status");
 const appListTitle = document.querySelector("#app-list-title");
 const appSearchGroup = document.querySelector("#app-search-group");
 const appSearch = document.querySelector("#app-search");
+const orderStatus = document.querySelector("#order-status");
 
 let token = "";
+let pairingSecret = "";
 let configuring = false;
 let heartbeatTimer = 0;
+let workspaceTimer = 0;
+let workspaceLoading = false;
+let workspaceSwitching = false;
+let workspaceGeneration = 0;
+let activeWorkspace = null;
+let connectionInterrupted = false;
 let deckMode = false;
 let deckFullscreenActive = false;
 let cardSize = "default";
 let fullWidth = false;
+let centerCards = false;
+let confirmStop = false;
 let latestApps = [];
+let appRevision = null;
+let dragState = null;
+let savingOrder = false;
+let deferredInstallPrompt = null;
+let installBusy = false;
+let installCompleted = false;
 const cardSizes = ["default", "large", "larger", "largest"];
 const cardScales = { large: 1.2, larger: 1.4, largest: 1.6 };
 
@@ -40,18 +64,23 @@ try {
   const savedSize = localStorage.getItem("appdeck-card-size");
   if (cardSizes.includes(savedSize)) cardSize = savedSize;
   fullWidth = localStorage.getItem("appdeck-full-width") === "true";
+  centerCards = localStorage.getItem("appdeck-center-cards") === "true";
+  confirmStop = localStorage.getItem("appdeck-confirm-stop") === "true";
 } catch (error) {
   preferenceError.textContent = "Browser preferences could not be loaded.";
   preferenceError.hidden = false;
 }
 cardSizeSelect.value = cardSize;
 fullWidthToggle.checked = fullWidth;
+centerCardsToggle.checked = centerCards;
+confirmStopToggle.checked = confirmStop;
 document.body.classList.toggle("full-width", fullWidth);
+document.body.classList.toggle("center-cards", centerCards);
 appsContainer.dataset.cardSize = cardSize;
 
 function applyCardSize() {
   appsContainer.dataset.cardSize = cardSize;
-  if (cardSize === "default") {
+  if (cardSize === "default" && !centerCards) {
     appsContainer.style.removeProperty("--card-width");
     return;
   }
@@ -60,7 +89,8 @@ function applyCardSize() {
   const gap = 0.6 * parseFloat(window.getComputedStyle(document.documentElement).fontSize);
   const columns = Math.max(1, Math.floor((width + gap) / (88 + gap)));
   const defaultWidth = (width - gap * (columns - 1)) / columns;
-  appsContainer.style.setProperty("--card-width", `${Math.min(width, defaultWidth * cardScales[cardSize])}px`);
+  const scale = cardSize === "default" ? 1 : cardScales[cardSize];
+  appsContainer.style.setProperty("--card-width", `${Math.min(width, defaultWidth * scale)}px`);
 }
 
 function updateDeckMode() {
@@ -92,12 +122,21 @@ function setConnected(value) {
   configureButton.hidden = !value;
   updateDeckMode();
   if (value) applyCardSize();
+  else {
+    resetDesktopAppearance();
+    window.clearInterval(workspaceTimer);
+    workspaceTimer = 0;
+    workspaceGeneration++;
+    workspaceButtons.replaceChildren();
+    workspaceError.textContent = "";
+    activeWorkspace = null;
+  }
 }
 
 function showPairingCodeFromUrl() {
   const fragment = window.location.hash.slice(1);
   if (!fragment) return;
-  token = fragment;
+  pairingSecret = fragment;
   window.history.replaceState(null, "", window.location.pathname);
   connect();
 }
@@ -159,7 +198,9 @@ function renderApps(apps) {
 
     if (!configuring) {
       card.type = "button";
+      card.dataset.appId = app.id;
       card.setAttribute("aria-label", `${app.state === "running" ? "Stop" : "Launch"} ${app.name}`);
+      card.setAttribute("aria-describedby", "order-hint");
       const artwork = document.createElement("span");
       artwork.className = "deck-artwork";
       const fallback = addText(artwork, "span", "deck-fallback", app.name.trim().charAt(0).toUpperCase() || "?");
@@ -191,7 +232,15 @@ function renderApps(apps) {
       favorite.addEventListener("click", () => updateFavorite(app.id, !app.selected));
       card.append(favorite);
     } else {
-      card.addEventListener("click", async () => {
+      addReorderHandlers(card);
+      card.addEventListener("click", async (event) => {
+        if (card.suppressClick || savingOrder) {
+          if (event) event.preventDefault();
+          card.suppressClick = false;
+          return;
+        }
+        if (app.state === "running" && confirmStop &&
+            !window.confirm(`Stop ${app.name}? Unsaved work may be lost.`)) return;
         card.disabled = true;
         await appAction(app.id, app.state === "running" ? "stop" : "launch");
         card.disabled = false;
@@ -201,21 +250,214 @@ function renderApps(apps) {
   }
 }
 
+function addReorderHandlers(card) {
+  function reducedMotion() {
+    return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+  }
+
+  function moveCard(x, y) {
+    const target = document.elementFromPoint(x, y)?.closest(".deck-card");
+    if (!target || target === card || target.parentElement !== appsContainer) return;
+    const cards = Array.from(appsContainer.children);
+    const positions = cards.map((item) => item.getBoundingClientRect());
+    for (const item of cards) item.reorderAnimation?.cancel();
+    const after = cards.indexOf(card) < cards.indexOf(target);
+    appsContainer.insertBefore(card, after ? target.nextSibling : target);
+    if (reducedMotion()) return;
+    cards.forEach((item, index) => {
+      if (item === card || typeof item.animate !== "function") return;
+      const current = item.getBoundingClientRect();
+      const dx = positions[index].left - current.left;
+      const dy = positions[index].top - current.top;
+      if (dx || dy) {
+        item.reorderAnimation = item.animate(
+          [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "translate(0, 0)" }],
+          { duration: 180, easing: "ease-out" }
+        );
+      }
+    });
+  }
+
+  function movePreview(state, x, y) {
+    if (!state.preview) return;
+    state.preview.style.left = `${x - state.offsetX}px`;
+    state.preview.style.top = `${y - state.offsetY}px`;
+  }
+
+  function autoScroll(state, x, y) {
+    state.pointerX = x;
+    state.pointerY = y;
+    const edge = 48;
+    state.scrollSpeed = y < edge ? -12 : y > window.innerHeight - edge ? 12 : 0;
+    if (!state.scrollSpeed || state.scrollFrame) return;
+    function tick() {
+      state.scrollFrame = 0;
+      if (dragState !== state || !state.scrollSpeed) return;
+      window.scrollBy(0, state.scrollSpeed);
+      moveCard(state.pointerX, state.pointerY);
+      state.scrollFrame = window.requestAnimationFrame(tick);
+    }
+    state.scrollFrame = window.requestAnimationFrame(tick);
+  }
+
+  function begin(x, y, kind, id) {
+    if (dragState || savingOrder || appRevision === null) return;
+    const state = { card, x, y, kind, id, active: false, initial: Array.from(appsContainer.children, (item) => item.dataset.appId) };
+    dragState = state;
+    state.timer = window.setTimeout(() => {
+      if (dragState !== state) return;
+      state.active = true;
+      const bounds = card.getBoundingClientRect();
+      state.offsetX = state.x - bounds.left;
+      state.offsetY = state.y - bounds.top;
+      state.preview = card.cloneNode(true);
+      state.preview.classList.add("drag-preview");
+      state.preview.setAttribute("aria-hidden", "true");
+      state.preview.tabIndex = -1;
+      state.preview.style.width = `${bounds.width}px`;
+      state.preview.style.height = `${bounds.height}px`;
+      movePreview(state, state.x, state.y);
+      document.body.append(state.preview);
+      card.classList.add("dragging");
+      orderStatus.textContent = "Move the card, then release to save its position.";
+    }, 500);
+  }
+
+  function move(x, y, event) {
+    const state = dragState;
+    if (!state || state.card !== card) return;
+    if (!state.active) {
+      if (Math.hypot(x - state.x, y - state.y) > 10) {
+        window.clearTimeout(state.timer);
+        dragState = null;
+      }
+      return;
+    }
+    if (event.cancelable) event.preventDefault();
+    movePreview(state, x, y);
+    moveCard(x, y);
+    autoScroll(state, x, y);
+  }
+
+  function finish(event, cancelled = false) {
+    const state = dragState;
+    if (!state || state.card !== card) return;
+    window.clearTimeout(state.timer);
+    if (state.scrollFrame) window.cancelAnimationFrame(state.scrollFrame);
+    dragState = null;
+    if (!state.active) return;
+    if (event.cancelable) event.preventDefault();
+    state.preview.remove();
+    card.classList.remove("dragging");
+    card.suppressClick = true;
+    window.setTimeout(() => { card.suppressClick = false; }, 500);
+    const order = Array.from(appsContainer.children, (item) => item.dataset.appId);
+    if (cancelled) {
+      orderStatus.textContent = "Move cancelled.";
+      renderApps(latestApps);
+    } else if (order.some((id, index) => id !== state.initial[index])) {
+      saveOrder(order);
+    } else {
+      orderStatus.textContent = "Card order unchanged.";
+    }
+  }
+
+  card.addEventListener("contextmenu", (event) => event.preventDefault());
+  card.addEventListener("touchstart", (event) => {
+    if (event.touches.length !== 1) {
+      if (dragState?.card === card) finish(event, true);
+      return;
+    }
+    const touch = event.touches[0];
+    begin(touch.clientX, touch.clientY, "touch", touch.identifier);
+  }, { passive: false });
+  card.addEventListener("touchmove", (event) => {
+    if (dragState?.kind !== "touch" || dragState.card !== card) return;
+    if (event.touches.length !== 1) {
+      finish(event, true);
+      return;
+    }
+    const touch = Array.from(event.touches).find((item) => item.identifier === dragState.id);
+    if (touch) move(touch.clientX, touch.clientY, event);
+  }, { passive: false });
+  card.addEventListener("touchend", (event) => {
+    if (dragState?.kind === "touch" && Array.from(event.changedTouches).some((item) => item.identifier === dragState.id))
+      finish(event);
+  }, { passive: false });
+  card.addEventListener("touchcancel", (event) => finish(event, true));
+
+  card.addEventListener("pointerdown", (event) => {
+    if (event.pointerType !== "mouse" || event.button !== 0) return;
+    card.setPointerCapture(event.pointerId);
+    begin(event.clientX, event.clientY, "mouse", event.pointerId);
+  });
+  card.addEventListener("pointermove", (event) => {
+    if (dragState?.kind === "mouse" && event.pointerId === dragState.id)
+      move(event.clientX, event.clientY, event);
+  });
+  card.addEventListener("pointerup", (event) => {
+    if (dragState?.kind === "mouse" && event.pointerId === dragState.id) finish(event);
+  });
+  card.addEventListener("pointercancel", (event) => finish(event, true));
+  card.addEventListener("keydown", (event) => {
+    if (!event.altKey || !["ArrowLeft", "ArrowRight"].includes(event.key) || savingOrder || appRevision === null) return;
+    const cards = Array.from(appsContainer.children);
+    const index = cards.indexOf(card);
+    const next = index + (event.key === "ArrowLeft" ? -1 : 1);
+    if (next < 0 || next >= cards.length) return;
+    event.preventDefault();
+    const order = cards.map((item) => item.dataset.appId);
+    [order[index], order[next]] = [order[next], order[index]];
+    saveOrder(order, card.dataset.appId);
+  });
+}
+
+async function saveOrder(order, focusId) {
+  savingOrder = true;
+  orderStatus.textContent = "Saving card order…";
+  let errorMessage = "";
+  try {
+    await request("/api/order", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ order, revision: appRevision })
+    });
+  } catch (error) {
+    errorMessage = error.message;
+  } finally {
+    savingOrder = false;
+  }
+  await loadApps();
+  if (errorMessage) {
+    appError.textContent = errorMessage;
+    orderStatus.textContent = "Card order was not saved.";
+  } else {
+    orderStatus.textContent = "Card order saved.";
+  }
+  const card = Array.from(appsContainer.children).find((item) => item.dataset.appId === focusId);
+  if (card) card.focus({ preventScroll: true });
+}
+
 async function loadApps() {
+  if (dragState || savingOrder) return;
   appError.textContent = "";
   try {
     const data = await request("/api/apps");
+    if (dragState || savingOrder) return;
+    appRevision = Number.isInteger(data.revision) ? data.revision : null;
     renderApps(data.apps);
     appError.textContent = data.iconError || "";
   } catch (error) {
     appError.textContent = error.message;
     if (error.message.includes("Pairing code")) {
       token = "";
-      sessionStorage.removeItem("appdeck-token");
+      clearSavedPairing();
       window.clearInterval(heartbeatTimer);
       heartbeatTimer = 0;
       pairingError.textContent = error.message;
       setConnected(false);
+    } else {
+      connectionInterrupted = true;
     }
   }
 }
@@ -223,17 +465,34 @@ async function loadApps() {
 async function sendHeartbeat() {
   if (!token) return;
   try {
-    await request("/api/ping", { method: "POST" });
+    const data = await request("/api/ping", { method: "POST" });
+    if (connectionInterrupted || (Number.isInteger(data.revision) && data.revision !== appRevision)) {
+      connectionInterrupted = false;
+      await loadApps();
+    }
+    refreshDesktopAppearance();
   } catch (error) {
     appError.textContent = error.message;
     if (error.message.includes("Pairing code")) {
       token = "";
-      sessionStorage.removeItem("appdeck-token");
+      clearSavedPairing();
       window.clearInterval(heartbeatTimer);
       heartbeatTimer = 0;
       pairingError.textContent = error.message;
       setConnected(false);
+    } else {
+      connectionInterrupted = true;
     }
+  }
+}
+
+function clearSavedPairing() {
+  try {
+    sessionStorage.removeItem("appdeck-token");
+    localStorage.removeItem("appdeck-token");
+  } catch (error) {
+    preferenceError.textContent = "Saved pairing could not be cleared. Clear this site's browser data before pairing again.";
+    preferenceError.hidden = false;
   }
 }
 
@@ -241,24 +500,101 @@ function startHeartbeat() {
   window.clearInterval(heartbeatTimer);
   sendHeartbeat();
   heartbeatTimer = window.setInterval(sendHeartbeat, 10000);
+  startWorkspaceUpdates();
+}
+
+function startWorkspaceUpdates() {
+  window.clearInterval(workspaceTimer);
+  workspaceTimer = 0;
+  if (!token || appsSection.hidden || document.hidden) return;
+  loadWorkspaces();
+  workspaceTimer = window.setInterval(loadWorkspaces, 2000);
+}
+
+async function loadWorkspaces() {
+  if (!token || appsSection.hidden || document.hidden || workspaceLoading || workspaceSwitching) return;
+  workspaceLoading = true;
+  const generation = workspaceGeneration;
+  try {
+    const data = await request("/api/workspaces");
+    if (generation !== workspaceGeneration || !token || appsSection.hidden || document.hidden) return;
+    if (!Array.isArray(data.workspaces) || data.workspaces.length > 256 ||
+        !Number.isInteger(data.active) || !data.workspaces.every((item) =>
+          Number.isInteger(item.id) && item.id > 0 && item.id <= 1000000 &&
+          Number.isInteger(item.label) && item.label === item.id % 10)) {
+      throw new Error("The PC returned invalid workspace data.");
+    }
+    const ids = data.workspaces.map((item) => String(item.id));
+    const existing = Array.from(workspaceButtons.children);
+    if (ids.length !== existing.length || ids.some((id, index) => existing[index].dataset.workspaceId !== id)) {
+      workspaceButtons.replaceChildren();
+      for (const item of data.workspaces) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.workspaceId = String(item.id);
+        button.textContent = String(item.label);
+        button.setAttribute("aria-label", `Workspace ${item.label}`);
+        button.addEventListener("click", () => focusWorkspace(item.id));
+        workspaceButtons.append(button);
+      }
+    }
+    activeWorkspace = data.active;
+    for (const button of workspaceButtons.children) {
+      const active = Number(button.dataset.workspaceId) === activeWorkspace;
+      button.classList.toggle("workspace-inactive", !active);
+      button.setAttribute("aria-pressed", String(active));
+    }
+    workspaceError.textContent = "";
+  } catch (error) {
+    if (generation !== workspaceGeneration || !token || appsSection.hidden) return;
+    workspaceButtons.replaceChildren();
+    activeWorkspace = null;
+    workspaceError.textContent = `Workspaces unavailable: ${error.message}`;
+  } finally {
+    workspaceLoading = false;
+    if (generation !== workspaceGeneration && !workspaceSwitching) loadWorkspaces();
+  }
+}
+
+async function focusWorkspace(id) {
+  if (workspaceSwitching || id === activeWorkspace) return;
+  workspaceSwitching = true;
+  workspaceGeneration++;
+  workspaceError.textContent = "";
+  try {
+    await request(`/api/workspaces/${id}/focus`, { method: "POST" });
+  } catch (error) {
+    workspaceError.textContent = `Could not switch workspace: ${error.message}`;
+    workspaceSwitching = false;
+    return;
+  }
+  workspaceSwitching = false;
+  loadWorkspaces();
 }
 
 async function connect() {
   pairingError.textContent = "";
   try {
     if (!token) {
-      const code = pairingCode.value.trim();
-      if (!/^[0-9]{4}-?[0-9]{4}$/.test(code))
+      const code = (pairingCode.value || "").trim();
+      if (!pairingSecret && !/^[0-9]{4}-?[0-9]{4}$/.test(code))
         throw new Error("Enter the eight-digit pairing code from the PC.");
       const result = await request("/api/pair", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code })
+        body: JSON.stringify({ ...(pairingSecret ? { secret: pairingSecret } : { code }), name: (deviceName.value || "").trim() || "Phone" })
       });
       token = result.token;
+      pairingSecret = "";
     }
     await request("/api/apps");
     sessionStorage.setItem("appdeck-token", token);
+    try {
+      localStorage.setItem("appdeck-token", token);
+    } catch (error) {
+      preferenceError.textContent = "Pairing could not be saved for future visits. Keep this session open or pair again next time.";
+      preferenceError.hidden = false;
+    }
     pairingCode.value = "";
     setConnected(true);
     await loadApps();
@@ -314,7 +650,7 @@ configureButton.addEventListener("click", () => {
   appsTitle.textContent = configuring ? "Configuration" : "Your apps";
   appsSubtitle.textContent = configuring
     ? "Added apps appear first. Choose apps for your launch deck."
-    : "Tap an app to launch or stop it.";
+    : "Tap to launch or stop. Hold and drag to reorder.";
   loadApps();
 });
 
@@ -346,6 +682,55 @@ deckModeButton.addEventListener("click", async () => {
 refreshButton.addEventListener("click", loadApps);
 appSearch.addEventListener("input", () => renderApps(latestApps));
 
+function updateInstallButton() {
+  const installed = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  installButton.hidden = installed || installCompleted || (!deferredInstallPrompt && typeof navigator.install !== "function");
+  installHelp.hidden = installed;
+  if (installed) installStatus.textContent = "App Deck is running as an installed app.";
+}
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+  updateInstallButton();
+});
+
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  installCompleted = true;
+  installButton.hidden = true;
+  installStatus.textContent = "App Deck was installed. Open it from your home screen and pair if prompted.";
+});
+
+installButton.addEventListener("click", async () => {
+  if (installBusy) return;
+  installBusy = true;
+  const prompt = deferredInstallPrompt;
+  deferredInstallPrompt = null;
+  try {
+    if (typeof navigator.install === "function") {
+      await navigator.install();
+      installCompleted = true;
+      installStatus.textContent = "App Deck was installed or opened. Pair if prompted.";
+    } else if (prompt) {
+      await prompt.prompt();
+      const choice = await prompt.userChoice;
+      installStatus.textContent = choice.outcome === "accepted"
+        ? "Installation accepted. Open App Deck from your home screen and pair if prompted."
+        : "Installation canceled.";
+    }
+  } catch (error) {
+    installStatus.textContent = error.name === "AbortError"
+      ? "Installation was canceled or could not complete."
+      : "Installation could not start. Use your browser's installation menu.";
+  } finally {
+    installBusy = false;
+    updateInstallButton();
+  }
+});
+
+updateInstallButton();
+
 document.addEventListener("fullscreenchange", () => {
   if (document.fullscreenElement) {
     if (deckMode) deckFullscreenActive = true;
@@ -353,6 +738,12 @@ document.addEventListener("fullscreenchange", () => {
     deckFullscreenActive = false;
     if (deckMode) setDeckMode(false);
   }
+});
+
+document.addEventListener("visibilitychange", () => {
+  startWorkspaceUpdates();
+  if (document.hidden) appearanceGeneration++;
+  else refreshDesktopAppearance();
 });
 
 cardSizeSelect.addEventListener("change", () => {
@@ -386,6 +777,30 @@ fullWidthToggle.addEventListener("change", () => {
   }
 });
 
+centerCardsToggle.addEventListener("change", () => {
+  centerCards = centerCardsToggle.checked;
+  document.body.classList.toggle("center-cards", centerCards);
+  applyCardSize();
+  try {
+    localStorage.setItem("appdeck-center-cards", String(centerCards));
+    preferenceError.hidden = true;
+  } catch (error) {
+    preferenceError.textContent = "Card centering preference could not be saved.";
+    preferenceError.hidden = false;
+  }
+});
+
+confirmStopToggle.addEventListener("change", () => {
+  confirmStop = confirmStopToggle.checked;
+  try {
+    localStorage.setItem("appdeck-confirm-stop", String(confirmStop));
+    preferenceError.hidden = true;
+  } catch (error) {
+    preferenceError.textContent = "Stop confirmation preference could not be saved.";
+    preferenceError.hidden = false;
+  }
+});
+
 window.addEventListener("resize", applyCardSize);
 if ("ResizeObserver" in window) {
   const cardSizeObserver = new ResizeObserver(applyCardSize);
@@ -402,7 +817,13 @@ if (window.location.protocol !== "https:") {
   setConnected(false);
   showPairingCodeFromUrl();
 } else {
-  token = sessionStorage.getItem("appdeck-token") || "";
+  try {
+    token = localStorage.getItem("appdeck-token") || sessionStorage.getItem("appdeck-token") || "";
+  } catch (error) {
+    token = sessionStorage.getItem("appdeck-token") || "";
+    preferenceError.textContent = "Saved pairing could not be loaded.";
+    preferenceError.hidden = false;
+  }
   if (token) {
     setConnected(true);
     loadApps();

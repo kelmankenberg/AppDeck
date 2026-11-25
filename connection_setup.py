@@ -8,7 +8,7 @@ import socket
 import subprocess
 import sys
 
-from appdeck_server import _atomic_write_json, config_home, normalize_origin, public_origins
+from appdeck_server import DeviceStore, _atomic_write_json, config_home, normalize_origin, pairing_token, public_origins
 
 
 BACKEND = "http://127.0.0.1:8765"
@@ -185,7 +185,20 @@ def tailscale_origin(allow_create: bool = True) -> str:
 
 def main() -> None:
     try:
-        if len(sys.argv) == 2 and sys.argv[1] == "tailscale":
+        if len(sys.argv) == 2 and sys.argv[1] == "disconnect":
+            DeviceStore().revoke_all()
+            pairing_token(rotate=True)
+            message = "Pairing credentials changed. Restarting App Deck."
+        elif len(sys.argv) == 2 and sys.argv[1] == "devices":
+            print(json.dumps({"ok": True, "devices": DeviceStore().list()}))
+            return
+        elif len(sys.argv) == 3 and sys.argv[1] == "revoke":
+            DeviceStore().update(sys.argv[2])
+            message = "Device disconnected. Other devices remain paired."
+        elif len(sys.argv) == 4 and sys.argv[1] == "rename":
+            DeviceStore().update(sys.argv[2], sys.argv[3])
+            message = "Device name saved."
+        elif len(sys.argv) == 2 and sys.argv[1] == "tailscale":
             path = config_home() / "appdeck/connection.json"
             existing = public_origins() if path.exists() else []
             candidate = tailscale_origin(allow_create=len(existing) < 2)
