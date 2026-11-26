@@ -2,6 +2,7 @@
 
 ## 0.2.0 - 2026-11-25
 
+- Use the `kelmankenberg` author handle in the plugin manifest.
 - Refreshed the marketplace preview and phone screenshots for workspace
   controls, optional desktop colors, centered cards, and the expanded settings.
 - Added optional horizontal card centering, including partially filled rows,

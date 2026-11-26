@@ -3,7 +3,7 @@
   "id": "kelmankenberg.appdeck",
   "name": "App Deck",
   "version": "0.2.0",
-  "author": "Kelly Mankenberg",
+  "author": "kelmankenberg",
   "description": "Launch and manage Omarchy apps from your phone",
   "kinds": [
     "bar-widget"
